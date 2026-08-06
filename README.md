@@ -62,6 +62,17 @@ Preloaded, no import needed:
   registry that survives kernel and gateway restarts
 - `harness_store()` — CRUD access to the durable harness (see below)
 
+Subagent children **inherit the parent's model** (whatever Hermes itself
+runs on) but do their legwork at low reasoning effort with a tight turn
+cap, passed as explicit CLI flags — profile-level `agent:` settings do not
+survive Hermes' config merge, so flags are the reliable route. Tune via:
+
+```bash
+HERMES_RLM_CHILD_REASONING=low   # any hermes reasoning level; "0" omits the flag
+HERMES_RLM_CHILD_MAX_TURNS=25    # tool-loop cap per child; "0" omits the flag
+HERMES_RLM_LEAF_PROFILE=rlm-leaf # minimal child profile; "0" inherits parent profile
+```
+
 ```python
 # One rlm_exec call:
 trades = my_skill.load("/path/to/trades.db")

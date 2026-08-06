@@ -512,7 +512,14 @@ class KernelHandle:
     # --- tool bridge ------------------------------------------------------
 
     def _serve_rpc(self) -> None:
-        from model_tools import handle_function_call
+        # Hermes' dispatcher is only importable inside a real Hermes install.
+        # Without it (bare CI, standalone use) the kernel still works —
+        # bridge tool calls fail with a clear error instead of killing this
+        # thread and taking the whole RPC server down with it.
+        try:
+            from model_tools import handle_function_call
+        except ImportError:
+            handle_function_call = None
 
         while not self._stop.is_set():
             try:
@@ -561,6 +568,12 @@ class KernelHandle:
                 if tool not in ALLOWED_TOOLS:
                     msg = f"tool {tool!r} not available in the RLM kernel"
                     conn.sendall((json.dumps({"__rlm_error__": msg}) + "\n").encode())
+                    continue
+
+                if handle_function_call is None:
+                    conn.sendall((json.dumps({"__rlm_error__":
+                        "Hermes tool dispatch is unavailable in this "
+                        "environment"}) + "\n").encode())
                     continue
 
                 real_out, real_err = sys.stdout, sys.stderr

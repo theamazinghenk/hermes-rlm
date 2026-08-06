@@ -112,6 +112,25 @@ def _hermes_cli() -> str:
     raise RuntimeError("hermes CLI not found next to sys.executable or on PATH")
 
 
+def _subagent_flags() -> list[str]:
+    """Extra CLI flags for child agents: think less, cap the loop.
+
+    Children inherit the parent's model (no pin), but run at low reasoning
+    effort with a tighter turn cap — legwork, not synthesis. Profile-level
+    agent settings do not reliably survive the config merge, so these are
+    passed as explicit CLI flags. Override via HERMES_RLM_CHILD_REASONING /
+    HERMES_RLM_CHILD_MAX_TURNS (set either to "0" to omit the flag).
+    """
+    flags: list[str] = []
+    reasoning = os.environ.get("HERMES_RLM_CHILD_REASONING", "low")
+    if reasoning and reasoning != "0":
+        flags += ["--reasoning", reasoning]
+    max_turns = os.environ.get("HERMES_RLM_CHILD_MAX_TURNS", "25")
+    if max_turns and max_turns != "0":
+        flags += ["--max-turns", max_turns]
+    return flags
+
+
 def _subagent_env(depth: int) -> dict:
     """Environment for a spawned subagent CLI process.
 
@@ -170,7 +189,8 @@ def _run_subagent(goal: str, context: str = "", timeout: int = SUBAGENT_TIMEOUT,
         # gets its goal in the prompt and needs no persona. Measured ~30%
         # faster startup (12.4s -> 8.6s); the rest is agent-loop assembly.
         proc = subprocess.run(
-            [_hermes_cli(), "chat", "-q", prompt, "-Q", "--ignore-rules"],
+            [_hermes_cli(), "chat", "-q", prompt, "-Q", "--ignore-rules",
+             *_subagent_flags()],
             capture_output=True, text=True, timeout=timeout, env=env,
         )
     except subprocess.TimeoutExpired:
@@ -271,7 +291,8 @@ def _spawn_subagent(goal: str, context: str = "") -> dict:
     try:
         out_fh = open(out_path, "w")
         proc = subprocess.Popen(
-            [_hermes_cli(), "chat", "-q", prompt, "-Q", "--ignore-rules"],
+            [_hermes_cli(), "chat", "-q", prompt, "-Q", "--ignore-rules",
+             *_subagent_flags()],
             stdout=out_fh, stderr=subprocess.STDOUT, text=True,
             env=_subagent_env(depth), start_new_session=True,
         )

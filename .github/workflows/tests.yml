@@ -1,0 +1,40 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+        rss_policy: [warn, stop]
+    env:
+      HERMES_RLM_RSS_POLICY: ${{ matrix.rss_policy }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run self-contained suites in an empty HERMES_HOME
+        run: |
+          export HERMES_HOME="$(mktemp -d)"
+          # Suites that exercise a live Hermes CLI (integration, bridge
+          # delegation, fast-path subagent fallback) need a configured
+          # Hermes install and are run in the release environment instead.
+          for t in tests/test_kernel.py tests/test_checkpoint.py \
+                   tests/test_harness.py tests/test_isolation.py \
+                   tests/test_feature_flags.py tests/test_adversarial.py \
+                   tests/test_stress.py tests/test_skills.py \
+                   tests/test_async_subagents.py; do
+            echo "== $t (RSS_POLICY=$HERMES_RLM_RSS_POLICY)"
+            python "$t"
+          done
+          if [ "$HERMES_RLM_RSS_POLICY" = "warn" ]; then
+            echo "== tests/test_limits.py (warn-mode suite)"
+            python tests/test_limits.py
+          fi

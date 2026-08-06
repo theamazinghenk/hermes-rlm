@@ -87,6 +87,15 @@ def _env(name: str, default: str) -> str:
         return default
 
 
+# Feature flags: "0" disables a capability COMPLETELY — the tool is not
+# registered, kernel helpers are not injected, and the internal bridge
+# refuses the call. This is what makes a minimal pilot (exec/vars/reset
+# only) actually enforceable rather than a README suggestion.
+FEATURE_CHECKPOINT = _env("HERMES_RLM_ENABLE_CHECKPOINT", "1") != "0"
+FEATURE_REFINE = _env("HERMES_RLM_ENABLE_REFINE", "1") != "0"
+FEATURE_SUBAGENTS = _env("HERMES_RLM_ENABLE_SUBAGENTS", "1") != "0"
+FEATURE_PYTHON_SKILLS = _env("HERMES_RLM_ENABLE_PYTHON_SKILLS", "1") != "0"
+
 DEFAULT_EXEC_TIMEOUT = 300
 SUBAGENT_TIMEOUT = 900
 IDLE_SHUTDOWN_SECONDS = int(_env("HERMES_RLM_IDLE_SECONDS", "3600"))
@@ -475,14 +484,19 @@ class KernelHandle:
         env["HERMES_RLM_RPC_SOCKET"] = self.socket_path
         env["HERMES_RLM_RPC_TOKEN"] = self.token
         env["HERMES_RLM_SESSION_ID"] = session_id
+        disabled = [n for n, on in (("subagents", FEATURE_SUBAGENTS),
+                                     ("refine", FEATURE_REFINE),
+                                     ("checkpoint", FEATURE_CHECKPOINT)) if not on]
+        env["HERMES_RLM_DISABLED"] = ",".join(disabled)
         env["PYTHONUNBUFFERED"] = "1"
         # Plugin dir first, then every Python-backed skill package parent so
         # `import <skill>` works inside the kernel with no install step.
         path_parts = [str(_HERE)]
-        try:
-            path_parts.extend(_skill_loader.sys_path_entries())
-        except Exception:  # noqa: BLE001 - skills are optional, kernel is not
-            pass
+        if FEATURE_PYTHON_SKILLS:
+            try:
+                path_parts.extend(_skill_loader.sys_path_entries())
+            except Exception:  # noqa: BLE001 - skills are optional, kernel is not
+                pass
         if env.get("PYTHONPATH"):
             path_parts.append(env["PYTHONPATH"])
         env["PYTHONPATH"] = os.pathsep.join(path_parts)
@@ -535,6 +549,11 @@ class KernelHandle:
                 # subagent instead of going through handle_function_call,
                 # which cannot reach the live parent agent from a plugin.
                 if tool == DELEGATE_SENTINEL:
+                    if not FEATURE_SUBAGENTS:
+                        conn.sendall((json.dumps({"__rlm_error__":
+                            "subagents are disabled by the operator "
+                            "(HERMES_RLM_ENABLE_SUBAGENTS=0)"}) + "\n").encode())
+                        continue
                     reply = _handle_delegate(request.get("args", {}))
                     conn.sendall((json.dumps(reply, default=str) + "\n").encode())
                     continue
@@ -620,6 +639,8 @@ class KernelHandle:
                 # rather than the main loop it succeeds and saves the load.
                 salvaged = None
                 try:
+                    if not FEATURE_CHECKPOINT:
+                        raise RuntimeError("checkpoint feature disabled")
                     self.proc.stdin.write(json.dumps({
                         "id": "salvage", "op": "checkpoint", "code": "",
                         "session": self.session_id, "name": "autosave",
@@ -685,7 +706,7 @@ def _autosave(handle: "KernelHandle") -> bool:
     Resource management (LRU eviction, idle reap) must not cost state: the
     next rlm_exec for this session restores the autosave automatically.
     """
-    if not handle.alive():
+    if not handle.alive() or not FEATURE_CHECKPOINT:
         return False
     try:
         result = handle.execute("", op="checkpoint", timeout=20,
@@ -743,7 +764,7 @@ def _get_kernel(session_id: str, create: bool = True) -> KernelHandle | None:
         # beyond a one-line note on the next reply.
         try:
             autosave_file = _checkpoint._session_dir(session_id) / "autosave.pkl"
-            if autosave_file.exists():
+            if FEATURE_CHECKPOINT and autosave_file.exists():
                 result = handle.execute("", op="restore", timeout=30,
                                         extra={"session": session_id,
                                                "name": "autosave"})
@@ -1124,47 +1145,52 @@ def register(ctx) -> None:
             "state. Use when memory grows too large or state became inconsistent."
         ),
     )
-    ctx.register_tool(
-        name="rlm_checkpoint",
-        toolset="rlm",
-        schema=CHECKPOINT_SCHEMA,
-        handler=_checkpoint_handler,
-        description=(
-            "Persist or restore the RLM kernel namespace so expensive state "
-            "survives a crash, a timeout kill or a machine restart. "
-            "action='save' after a costly load; action='restore' to bring it "
-            "back into a fresh kernel; 'list' and 'delete' to manage them. "
-            "Checkpoints are deliberately partial — objects that cannot be "
-            "pickled (open connections, sockets, lambdas) are reported by name "
-            "rather than silently dropped, so you know what to rebuild."
-        ),
-    )
-    ctx.register_tool(
-        name="rlm_skills",
-        toolset="rlm",
-        schema=SKILLS_SCHEMA,
-        handler=_skills_handler,
-        description=(
-            "List Python-backed skills importable inside the RLM kernel. These are "
-            "skills that ship a python/ package next to SKILL.md, so a proven "
-            "workflow is a typed callable instead of code the model rewrites each "
-            "run. Returns names, import names and one-line summaries only."
-        ),
-    )
-    ctx.register_tool(
-        name="rlm_refine",
-        toolset="rlm",
-        schema=REFINE_SCHEMA,
-        handler=_refine_handler,
-        description=(
-            "Durable harness: keep lessons, decisions, failure modes and "
-            "delegation recipes across sessions. action='refine' distils the "
-            "recent transcript into at most 4 evidence-backed entries via one "
-            "model call (validated, snapshotted, reversible with rollback); "
-            "action='add' stores one entry directly. Entries are injected "
-            "compactly into future system prompts. Use after finishing "
-            "non-trivial work whose lessons should outlive this session."
-        ),
-    )
-    if hasattr(ctx, "register_hook"):
-        ctx.register_hook("pre_llm_call", _harness_pre_llm_call)
+    # Optional capabilities: a disabled feature is absent, not hidden —
+    # no tool schema, no kernel helper, and the bridge refuses the call.
+    if FEATURE_CHECKPOINT:
+        ctx.register_tool(
+            name="rlm_checkpoint",
+            toolset="rlm",
+            schema=CHECKPOINT_SCHEMA,
+            handler=_checkpoint_handler,
+            description=(
+                "Persist or restore the RLM kernel namespace so expensive state "
+                "survives a crash, a timeout kill or a machine restart. "
+                "action='save' after a costly load; action='restore' to bring it "
+                "back into a fresh kernel; 'list' and 'delete' to manage them. "
+                "Checkpoints are deliberately partial — objects that cannot be "
+                "pickled (open connections, sockets, lambdas) are reported by name "
+                "rather than silently dropped, so you know what to rebuild."
+            ),
+        )
+    if FEATURE_PYTHON_SKILLS:
+        ctx.register_tool(
+            name="rlm_skills",
+            toolset="rlm",
+            schema=SKILLS_SCHEMA,
+            handler=_skills_handler,
+            description=(
+                "List Python-backed skills importable inside the RLM kernel. These are "
+                "skills that ship a python/ package next to SKILL.md, so a proven "
+                "workflow is a typed callable instead of code the model rewrites each "
+                "run. Returns names, import names and one-line summaries only."
+            ),
+        )
+    if FEATURE_REFINE:
+        ctx.register_tool(
+            name="rlm_refine",
+            toolset="rlm",
+            schema=REFINE_SCHEMA,
+            handler=_refine_handler,
+            description=(
+                "Durable harness: keep lessons, decisions, failure modes and "
+                "delegation recipes across sessions. action='refine' distils the "
+                "recent transcript into at most 4 evidence-backed entries via one "
+                "model call (validated, snapshotted, reversible with rollback); "
+                "action='add' stores one entry directly. Entries are injected "
+                "compactly into future system prompts. Use after finishing "
+                "non-trivial work whose lessons should outlive this session."
+            ),
+        )
+        if hasattr(ctx, "register_hook"):
+            ctx.register_hook("pre_llm_call", _harness_pre_llm_call)

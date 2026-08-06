@@ -19,7 +19,15 @@ import threading
 
 _SOCKET_PATH = os.environ.get("HERMES_RLM_RPC_SOCKET", "")
 _TOKEN = os.environ.get("HERMES_RLM_RPC_TOKEN", "")
+_DISABLED = set(filter(None, os.environ.get("HERMES_RLM_DISABLED", "").split(",")))
 _lock = threading.Lock()
+
+
+def _require(feature: str) -> None:
+    if feature in _DISABLED:
+        raise RlmBridgeError(
+            f"{feature} are disabled by the operator "
+            f"(HERMES_RLM_ENABLE_{feature.upper()}=0)")
 
 
 class RlmBridgeError(RuntimeError):
@@ -125,6 +133,7 @@ def rlm(goal: str, context: str = "", role: str = "leaf", fast: bool = False):
     genuinely tool-free work.
     """
     del role  # reserved; the CLI subagent inherits the parent's toolsets
+    _require("subagents")
     return _call("__rlm_delegate__", {"goal": goal, "context": context, "fast": fast})
 
 
@@ -140,6 +149,7 @@ def rlm_many(tasks: list, fast: bool = False):
     fast (optional, overrides the batch default).
     Returns {"results": [...], "parallel_workers": int, "wall_seconds": float}.
     """
+    _require("subagents")
     return _call("__rlm_delegate__", {"tasks": tasks, "fast": fast})
 
 
@@ -154,6 +164,7 @@ def rlm_spawn(goal, context: str = ""):
     Prefer this over `rlm()` whenever you have other work to do meanwhile,
     or when the child's full output does not belong in your context.
     """
+    _require("subagents")
     if isinstance(goal, list):
         return _call("__rlm_delegate__", {"mode": "spawn", "tasks": goal})
     return _call("__rlm_delegate__",
@@ -167,6 +178,7 @@ def rlm_wait(ids: list, timeout: int = 600):
     summary tail and output_path for the full transcript. `timed_out` lists
     ids still running when the timeout hit — they keep running; call again.
     """
+    _require("subagents")
     if isinstance(ids, str):
         ids = [ids]
     return _call("__rlm_delegate__",
@@ -175,6 +187,7 @@ def rlm_wait(ids: list, timeout: int = 600):
 
 def rlm_children(limit: int = 20):
     """List recent spawned subagents (newest first) from the disk registry."""
+    _require("subagents")
     return _call("__rlm_delegate__", {"mode": "list", "limit": limit})
 
 
@@ -185,6 +198,7 @@ def harness_store(scope: str = "session"):
     rollback). scope='global' reaches the store shared by every session.
     File-level mtime sync keeps kernel and host writers consistent.
     """
+    _require("refine")
     from harness import HarnessStore
     if scope == "global":
         return HarnessStore("global")

@@ -1,5 +1,5 @@
 name: hermes-rlm
-version: 0.4.0
+version: 0.4.1
 description: Persistent Python kernel per session plus rlm()/rlm_many() subagents callable from inside it.
 provides_tools:
   - rlm_exec

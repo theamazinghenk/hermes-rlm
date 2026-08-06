@@ -215,11 +215,33 @@ for t in tests/test_*.py; do ~/.hermes/hermes-agent/venv/bin/python "$t"; done
 ~/.hermes/hermes-agent/venv/bin/python tests/benchmark_context.py
 ```
 
-All eleven suites print `ok` and exit 0 on any machine — tests fabricate
+All thirteen suites print `ok` and exit 0 on any machine — tests fabricate
 their own fixtures; the two benchmarks skip cleanly unless you point them
-at a dataset (`HERMES_RLM_BENCH_DB`, `HERMES_RLM_IMPACT_*`).
+at a dataset (`HERMES_RLM_BENCH_DB`, `HERMES_RLM_IMPACT_*`). CI runs the
+self-contained suites across Python 3.11–3.13 with both RSS policies in an
+empty `HERMES_HOME`; suites that exercise a live Hermes CLI run in the
+release environment.
 
 ## Changelog
+
+### 0.4.1 — enforceable feature selection
+
+- **Hard feature flags** (the last fleet-review blocker): setting
+  `HERMES_RLM_ENABLE_CHECKPOINT=0`, `HERMES_RLM_ENABLE_REFINE=0`,
+  `HERMES_RLM_ENABLE_SUBAGENTS=0` or `HERMES_RLM_ENABLE_PYTHON_SKILLS=0`
+  makes that capability *absent*, not hidden: the tool is never registered,
+  kernel helpers refuse with an operator message, skills paths stay off the
+  kernel's `sys.path`, and with checkpoints off even autosave/salvage (a
+  pickle path) is a no-op. `tests/test_feature_flags.py` proves both modes.
+- GitHub Actions CI: Python 3.11–3.13 × RSS policy warn/stop in an empty
+  `HERMES_HOME`.
+
+A minimal pilot (exec/vars/reset only) is now one line of configuration:
+
+```bash
+HERMES_RLM_ENABLE_CHECKPOINT=0 HERMES_RLM_ENABLE_REFINE=0 \
+HERMES_RLM_ENABLE_SUBAGENTS=0 HERMES_RLM_ENABLE_PYTHON_SKILLS=0
+```
 
 ### 0.4.0 — fleet hardening
 
@@ -248,8 +270,8 @@ previous behaviour stays available behind explicit opt-ins.
 Suggested pilot posture for a fleet:
 `HERMES_RLM_MAX_KERNELS=2 HERMES_RLM_MAX_RSS_MB=512
 HERMES_RLM_IDLE_SECONDS=900 HERMES_RLM_RSS_POLICY=stop
-HERMES_RLM_HARNESS_INJECT=0`, tools limited to
-rlm_exec/rlm_vars/rlm_reset via your profile's tool policy.
+HERMES_RLM_HARNESS_INJECT=0` plus the 0.4.1 feature flags to reduce the
+surface to rlm_exec/rlm_vars/rlm_reset.
 
 ### 0.3.0
 

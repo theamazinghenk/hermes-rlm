@@ -23,11 +23,18 @@ from __future__ import annotations
 
 import json
 import re
+import os
 from pathlib import Path
 
+def _hermes_home() -> Path:
+    """Hermes home with HERMES_HOME respected (fleet/profile isolation)."""
+    env = os.environ.get("HERMES_HOME")
+    return Path(env).expanduser() if env else Path.home() / ".hermes"
+
+
 SKILL_ROOTS = [
-    Path.home() / ".hermes" / "skills",
-    Path.home() / ".hermes" / "plugins",
+    _hermes_home() / "skills",
+    _hermes_home() / "plugins",
 ]
 
 _NAME_RE = re.compile(r"^name:\s*(.+?)\s*$", re.MULTILINE)

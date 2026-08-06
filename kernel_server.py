@@ -38,7 +38,8 @@ MAX_REPR_CHARS = 2_000
 # so the model can read the full text back with open()/read_file on demand.
 # Mirrors prime-agent's output-accumulator (tail buffer + fullOutputPath).
 SPILL_DIR = os.path.join(
-    os.path.expanduser("~"), ".hermes", "state", "rlm", "spill"
+    os.environ.get("HERMES_HOME") or os.path.join(os.path.expanduser("~"), ".hermes"),
+    "state", "rlm", "spill",
 )
 SPILL_KEEP = 40  # newest spill files kept; older ones pruned on each spill
 
@@ -152,7 +153,8 @@ class Kernel:
             if op == "checkpoint":
                 result = _cp.save(self.ns, session, name)
             else:
-                result = _cp.load(session, name)
+                result = _cp.load(session, name,
+                                  allow_cross_session=bool(req.get("allow_cross_session")))
                 if result.get("ok"):
                     # Merge rather than replace: a restore must not wipe
                     # bindings the caller created since the checkpoint.

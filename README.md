@@ -221,6 +221,36 @@ at a dataset (`HERMES_RLM_BENCH_DB`, `HERMES_RLM_IMPACT_*`).
 
 ## Changelog
 
+### 0.4.0 — fleet hardening
+
+Driven by an external fleet review (thanks!). Safe defaults everywhere;
+previous behaviour stays available behind explicit opt-ins.
+
+- **`HERMES_HOME` respected in every state path** (harness, checkpoints,
+  spill, subagent registry, env, skills, profiles) — isolated profiles and
+  migrated agents no longer leak state into the wrong home. Covered by a
+  dedicated `tests/test_isolation.py` proving two homes stay disjoint.
+- **Cross-session checkpoint restore is now opt-in** (`allow_cross_session`
+  parameter, default false). A session can never silently load another
+  session's pickle.
+- **Children load AGENTS.md/SOUL.md by default.** The `--ignore-rules`
+  speedup (~30%) is now an explicit operator choice:
+  `HERMES_RLM_CHILD_IGNORE_RULES=1`.
+- **Resource ceilings are configurable and can be made hard**:
+  `HERMES_RLM_MAX_KERNELS`, `HERMES_RLM_MAX_RSS_MB`,
+  `HERMES_RLM_IDLE_SECONDS`, and `HERMES_RLM_RSS_POLICY=stop` (autosave +
+  kill instead of a warning — recommended on shared machines).
+- **Harness prompt injection can be disabled** (`HERMES_RLM_HARNESS_INJECT=0`)
+  for fleets that already have centrally governed memory layers.
+- Fast-path live speed checks skip cleanly when no provider is configured,
+  and the speedup threshold is environment-aware (>1.2×).
+
+Suggested pilot posture for a fleet:
+`HERMES_RLM_MAX_KERNELS=2 HERMES_RLM_MAX_RSS_MB=512
+HERMES_RLM_IDLE_SECONDS=900 HERMES_RLM_RSS_POLICY=stop
+HERMES_RLM_HARNESS_INJECT=0`, tools limited to
+rlm_exec/rlm_vars/rlm_reset via your profile's tool policy.
+
 ### 0.3.0
 
 - **Handle-only subagents**: `rlm_spawn(goal)` returns a handle immediately;

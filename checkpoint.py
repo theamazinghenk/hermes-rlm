@@ -18,7 +18,13 @@ import os
 import pickle
 from pathlib import Path
 
-CHECKPOINT_ROOT = Path.home() / ".hermes" / "cache" / "rlm_checkpoints"
+def _hermes_home() -> Path:
+    """Hermes home with HERMES_HOME respected (fleet/profile isolation)."""
+    env = os.environ.get("HERMES_HOME")
+    return Path(env).expanduser() if env else Path.home() / ".hermes"
+
+
+CHECKPOINT_ROOT = _hermes_home() / "cache" / "rlm_checkpoints"
 
 # Never worth persisting: modules re-import, and the bridge is re-injected on
 # boot with a fresh socket path and token.
@@ -85,7 +91,7 @@ def save(namespace: dict, session: str, name: str = "latest") -> dict:
     return report
 
 
-def load(session: str, name: str = "latest", allow_cross_session: bool = True) -> dict:
+def load(session: str, name: str = "latest", allow_cross_session: bool = False) -> dict:
     """Read a checkpoint. Returns {"ok", "namespace"|"error"}.
 
     Sessions are keyed by a per-session id, so the session that needs a

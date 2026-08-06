@@ -25,7 +25,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-HERMES_ENV = Path.home() / ".hermes" / ".env"
+HERMES_ENV = (Path(os.environ["HERMES_HOME"]).expanduser()
+              if os.environ.get("HERMES_HOME") else Path.home() / ".hermes") / ".env"
 
 # Signals that a task genuinely needs the agent loop: filesystem, shell,
 # network, or any multi-step work. Matching is deliberately eager — a false

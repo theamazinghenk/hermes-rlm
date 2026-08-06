@@ -18,7 +18,13 @@ import time
 import uuid
 from pathlib import Path
 
-HARNESS_ROOT = Path.home() / ".hermes" / "state" / "rlm" / "harness"
+def _hermes_home() -> Path:
+    """Hermes home with HERMES_HOME respected (fleet/profile isolation)."""
+    env = os.environ.get("HERMES_HOME")
+    return Path(env).expanduser() if env else Path.home() / ".hermes"
+
+
+HARNESS_ROOT = _hermes_home() / "state" / "rlm" / "harness"
 KINDS = ("prompt", "memory", "skill", "subagent")
 MAX_ENTRY_CHARS = 4000
 MAX_LEDGER = 100

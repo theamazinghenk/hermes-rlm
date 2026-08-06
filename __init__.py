@@ -76,13 +76,16 @@ DELEGATE_SENTINEL = "__rlm_delegate__"
 
 DEFAULT_EXEC_TIMEOUT = 300
 SUBAGENT_TIMEOUT = 900
-IDLE_SHUTDOWN_SECONDS = 3600
+IDLE_SHUTDOWN_SECONDS = int(os.environ.get("HERMES_RLM_IDLE_SECONDS", "3600"))
 
 # Resource ceilings. Without these one session can allocate until the machine
 # swaps, and a busy gateway can accumulate kernels until it runs out of file
 # descriptors. Measured baseline: ~17 MB per idle kernel.
-MAX_KERNELS = 12
-MAX_KERNEL_RSS_MB = 2048
+MAX_KERNELS = int(os.environ.get("HERMES_RLM_MAX_KERNELS", "12"))
+MAX_KERNEL_RSS_MB = int(os.environ.get("HERMES_RLM_MAX_RSS_MB", "2048"))
+# "warn" (default) surfaces a remedy; "stop" autosaves and kills the kernel —
+# the right setting for shared/fleet machines.
+RSS_POLICY = os.environ.get("HERMES_RLM_RSS_POLICY", "warn")
 RSS_CHECK_EVERY = 10  # execs between resource checks — ps is not free
 
 # Depth guard: a subagent inheriting this plugin must not recurse forever.
@@ -95,6 +98,12 @@ MAX_PARALLEL_SUBAGENTS = 9
 
 _kernels: dict[str, "KernelHandle"] = {}
 _kernels_lock = threading.Lock()
+
+
+def _hermes_home() -> Path:
+    """Hermes home with HERMES_HOME respected (fleet/profile isolation)."""
+    env = os.environ.get("HERMES_HOME")
+    return Path(env).expanduser() if env else Path.home() / ".hermes"
 
 
 def _json(obj: Any) -> str:
@@ -122,6 +131,11 @@ def _subagent_flags() -> list[str]:
     HERMES_RLM_CHILD_MAX_TURNS (set either to "0" to omit the flag).
     """
     flags: list[str] = []
+    # AGENTS.md/SOUL.md injection is ON by default: fleet rules, branding and
+    # secret policy must reach children unless the operator explicitly says
+    # a bare leaf is acceptable (~30% faster startup).
+    if os.environ.get("HERMES_RLM_CHILD_IGNORE_RULES", "0") == "1":
+        flags.append("--ignore-rules")
     reasoning = os.environ.get("HERMES_RLM_CHILD_REASONING", "low")
     if reasoning and reasoning != "0":
         flags += ["--reasoning", reasoning]
@@ -144,7 +158,7 @@ def _subagent_env(depth: int) -> dict:
     env[_DEPTH_ENV] = str(depth + 1)
     env["HERMES_DELEGATED_CHILD_CONTEXT"] = "1"
     leaf = os.environ.get("HERMES_RLM_LEAF_PROFILE", "rlm-leaf")
-    if leaf and leaf != "0" and (Path.home() / ".hermes" / "profiles" / leaf).is_dir():
+    if leaf and leaf != "0" and (_hermes_home() / "profiles" / leaf).is_dir():
         env["HERMES_PROFILE"] = leaf
     return env
 
@@ -189,8 +203,7 @@ def _run_subagent(goal: str, context: str = "", timeout: int = SUBAGENT_TIMEOUT,
         # gets its goal in the prompt and needs no persona. Measured ~30%
         # faster startup (12.4s -> 8.6s); the rest is agent-loop assembly.
         proc = subprocess.run(
-            [_hermes_cli(), "chat", "-q", prompt, "-Q", "--ignore-rules",
-             *_subagent_flags()],
+            [_hermes_cli(), "chat", "-q", prompt, "-Q", *_subagent_flags()],
             capture_output=True, text=True, timeout=timeout, env=env,
         )
     except subprocess.TimeoutExpired:
@@ -235,7 +248,7 @@ def _run_subagent(goal: str, context: str = "", timeout: int = SUBAGENT_TIMEOUT,
 # survives kernel restarts and even a gateway restart. Mirrors prime-agent's
 # child-registry invariant without needing a daemon.
 
-SUBAGENT_STATE_DIR = Path.home() / ".hermes" / "state" / "rlm" / "subagents"
+SUBAGENT_STATE_DIR = _hermes_home() / "state" / "rlm" / "subagents"
 SUBAGENT_KEEP = 200  # newest child dirs kept; older pruned on spawn
 _TERMINAL_STATUSES = {"done", "error", "finished-unverified"}
 
@@ -291,8 +304,7 @@ def _spawn_subagent(goal: str, context: str = "") -> dict:
     try:
         out_fh = open(out_path, "w")
         proc = subprocess.Popen(
-            [_hermes_cli(), "chat", "-q", prompt, "-Q", "--ignore-rules",
-             *_subagent_flags()],
+            [_hermes_cli(), "chat", "-q", prompt, "-Q", *_subagent_flags()],
             stdout=out_fh, stderr=subprocess.STDOUT, text=True,
             env=_subagent_env(depth), start_new_session=True,
         )
@@ -772,6 +784,13 @@ CHECKPOINT_SCHEMA = {
             "description": "Checkpoint name (default 'latest'). Use distinct names "
                            "to keep several restore points.",
         },
+        "allow_cross_session": {
+            "type": "boolean",
+            "description": "restore only: allow borrowing the newest same-named "
+                           "checkpoint from ANOTHER session when this session has "
+                           "none. Default false — cross-session data mixing must "
+                           "be an explicit choice.",
+        },
     },
     "required": ["action"],
 }
@@ -794,6 +813,15 @@ def _exec_handler(args: dict, **kwargs) -> str:
     if handle.alive() and handle.exec_count % RSS_CHECK_EVERY == 0:
         rss = _rss_mb(handle.proc.pid)
         if rss > MAX_KERNEL_RSS_MB:
+            if RSS_POLICY == "stop":
+                _autosave(handle)
+                handle.shutdown()
+                _kernels.pop(session_id, None)
+                return _json({"ok": False, "error": (
+                    f"kernel exceeded the hard RSS limit ({rss:.0f} MB > "
+                    f"{MAX_KERNEL_RSS_MB} MB) and was stopped. State was "
+                    "autosaved — restore with rlm_checkpoint(action='restore', "
+                    "name='autosave') and load less at once.")})
             warning = (
                 f"kernel is using {rss:.0f} MB (limit {MAX_KERNEL_RSS_MB} MB). "
                 "Free what you no longer need (`del big_var; import gc; gc.collect()`), "
@@ -879,7 +907,10 @@ def _checkpoint_handler(args: dict, **kwargs) -> str:
 
     handle = _get_kernel(session_id)
     op = "checkpoint" if action == "save" else "restore"
-    result = handle.execute("", op=op, extra={"session": session_id, "name": name})
+    extra = {"session": session_id, "name": name}
+    if action == "restore" and args.get("allow_cross_session"):
+        extra["allow_cross_session"] = True
+    result = handle.execute("", op=op, extra=extra)
     if not result.get("ok"):
         return _json({"ok": False, "error": result.get("error") or "checkpoint failed"})
     try:
@@ -941,7 +972,7 @@ Return {{"edits": []}} if nothing is worth keeping."""
 def _recent_transcript(session_id: str, max_chars: int = 40_000) -> str:
     """Recent turns for this session from the Hermes session store, oldest first."""
     import sqlite3
-    db = Path.home() / ".hermes" / "state.db"
+    db = _hermes_home() / "state.db"
     try:
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
         rows = con.execute(
@@ -1022,6 +1053,8 @@ def _harness_pre_llm_call(user_message: str, conversation_history: list,
                           is_first_turn: bool, model: str, platform: str,
                           session_id: str = "", **kwargs: Any) -> dict | None:
     """Inject the compact harness overview; never break the LLM call."""
+    if os.environ.get("HERMES_RLM_HARNESS_INJECT", "1") == "0":
+        return None
     try:
         text = _harness.overview(session_id or None)
         return {"context": text} if text else None

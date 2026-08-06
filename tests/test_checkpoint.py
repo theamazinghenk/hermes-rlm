@@ -146,9 +146,12 @@ S6 = "cp-origin"
 ex("rescued = 'from a dead session'", S6)
 cp("save", S6, "handover")
 plugin._reset_handler({}, task_id=S6)
+# Cross-session borrowing is opt-in since the fleet-isolation hardening:
+# without the flag this restore must fail (covered in test_isolation.py).
 fresh = json.loads(plugin._checkpoint_handler(
-    {"action": "restore", "name": "handover"}, task_id="cp-brand-new-session"))
-check("a fresh session can recover another session's checkpoint",
+    {"action": "restore", "name": "handover", "allow_cross_session": True},
+    task_id="cp-brand-new-session"))
+check("a fresh session can recover another session's checkpoint (opt-in)",
       fresh.get("ok"), str(fresh)[:120])
 check("the borrow is reported, never silent",
       fresh.get("borrowed_from_session") == "cp-origin",

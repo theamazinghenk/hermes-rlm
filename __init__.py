@@ -74,18 +74,31 @@ ALLOWED_TOOLS = frozenset({
 # Sentinel the bridge sends for delegation; handled locally, never dispatched.
 DELEGATE_SENTINEL = "__rlm_delegate__"
 
+def _env(name: str, default: str) -> str:
+    """HERMES_RLM_* knob: process env first, then ~/.hermes/.env (HERMES_HOME
+    aware). The gateway does not bridge .env into os.environ, so operator
+    knobs set there must still reach the plugin."""
+    val = os.environ.get(name)
+    if val is not None:
+        return val
+    try:
+        return _fast_path._read_env_key(name) or default
+    except Exception:  # noqa: BLE001
+        return default
+
+
 DEFAULT_EXEC_TIMEOUT = 300
 SUBAGENT_TIMEOUT = 900
-IDLE_SHUTDOWN_SECONDS = int(os.environ.get("HERMES_RLM_IDLE_SECONDS", "3600"))
+IDLE_SHUTDOWN_SECONDS = int(_env("HERMES_RLM_IDLE_SECONDS", "3600"))
 
 # Resource ceilings. Without these one session can allocate until the machine
 # swaps, and a busy gateway can accumulate kernels until it runs out of file
 # descriptors. Measured baseline: ~17 MB per idle kernel.
-MAX_KERNELS = int(os.environ.get("HERMES_RLM_MAX_KERNELS", "12"))
-MAX_KERNEL_RSS_MB = int(os.environ.get("HERMES_RLM_MAX_RSS_MB", "2048"))
+MAX_KERNELS = int(_env("HERMES_RLM_MAX_KERNELS", "12"))
+MAX_KERNEL_RSS_MB = int(_env("HERMES_RLM_MAX_RSS_MB", "2048"))
 # "warn" (default) surfaces a remedy; "stop" autosaves and kills the kernel —
 # the right setting for shared/fleet machines.
-RSS_POLICY = os.environ.get("HERMES_RLM_RSS_POLICY", "warn")
+RSS_POLICY = _env("HERMES_RLM_RSS_POLICY", "warn")
 RSS_CHECK_EVERY = 10  # execs between resource checks — ps is not free
 
 # Depth guard: a subagent inheriting this plugin must not recurse forever.
@@ -134,12 +147,12 @@ def _subagent_flags() -> list[str]:
     # AGENTS.md/SOUL.md injection is ON by default: fleet rules, branding and
     # secret policy must reach children unless the operator explicitly says
     # a bare leaf is acceptable (~30% faster startup).
-    if os.environ.get("HERMES_RLM_CHILD_IGNORE_RULES", "0") == "1":
+    if _env("HERMES_RLM_CHILD_IGNORE_RULES", "0") == "1":
         flags.append("--ignore-rules")
-    reasoning = os.environ.get("HERMES_RLM_CHILD_REASONING", "low")
+    reasoning = _env("HERMES_RLM_CHILD_REASONING", "low")
     if reasoning and reasoning != "0":
         flags += ["--reasoning", reasoning]
-    max_turns = os.environ.get("HERMES_RLM_CHILD_MAX_TURNS", "25")
+    max_turns = _env("HERMES_RLM_CHILD_MAX_TURNS", "25")
     if max_turns and max_turns != "0":
         flags += ["--max-turns", max_turns]
     return flags
@@ -157,7 +170,7 @@ def _subagent_env(depth: int) -> dict:
     env = dict(os.environ)
     env[_DEPTH_ENV] = str(depth + 1)
     env["HERMES_DELEGATED_CHILD_CONTEXT"] = "1"
-    leaf = os.environ.get("HERMES_RLM_LEAF_PROFILE", "rlm-leaf")
+    leaf = _env("HERMES_RLM_LEAF_PROFILE", "rlm-leaf")
     if leaf and leaf != "0" and (_hermes_home() / "profiles" / leaf).is_dir():
         env["HERMES_PROFILE"] = leaf
     return env
@@ -1053,7 +1066,7 @@ def _harness_pre_llm_call(user_message: str, conversation_history: list,
                           is_first_turn: bool, model: str, platform: str,
                           session_id: str = "", **kwargs: Any) -> dict | None:
     """Inject the compact harness overview; never break the LLM call."""
-    if os.environ.get("HERMES_RLM_HARNESS_INJECT", "1") == "0":
+    if _env("HERMES_RLM_HARNESS_INJECT", "1") == "0":
         return None
     try:
         text = _harness.overview(session_id or None)

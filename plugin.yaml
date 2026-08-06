@@ -1,0 +1,10 @@
+name: hermes-rlm
+version: 0.3.0
+description: Persistent Python kernel per session plus rlm()/rlm_many() subagents callable from inside it.
+provides_tools:
+  - rlm_exec
+  - rlm_vars
+  - rlm_reset
+  - rlm_checkpoint
+  - rlm_skills
+  - rlm_refine

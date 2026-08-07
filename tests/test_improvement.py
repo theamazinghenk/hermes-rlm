@@ -149,4 +149,20 @@ with tempfile.TemporaryDirectory() as tmp:
     assert not build_for("tests/test_kernel.py")["approved"], "tests must not auto-approve"
     assert not build_for("kernel_server.py")["approved"], "source must not auto-approve"
 
+    # Auto-approval explains itself when it declines.
+    declined = build_for("kernel_server.py")
+    assert declined["manual_because"], "declined auto-approval must give a reason"
+
+    # Size bounds: a "docs" change big enough to be a rewrite still needs a human.
+    cand = ctl.classify(text="Traceback in api.py")
+    huge = "".join(f"+line {i}\n" for i in range(200))
+    ctl.coder = lambda args: {
+        "ok": True, "worktree": str(wt), "tests_ok": True, "review": "LGTM",
+        "diff": f"--- a/docs/a.md\n+++ b/docs/a.md\n@@ -0,0 +1,200 @@\n{huge}"}
+    ctl.build(cand["id"], str(repo))
+    ctl.evaluate(cand["id"], {"baseline": {}, "candidate": {}, "thresholds": {}})
+    oversized = ctl.promote(cand["id"], automatic=True)
+    assert not oversized["approved"], "oversized prose diff must not auto-approve"
+    assert any("diff lines" in r for r in oversized["manual_because"]), oversized["manual_because"]
+
 print("ok")

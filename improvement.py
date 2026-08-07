@@ -33,6 +33,10 @@ PROTECTED = (
 # assertions, so test changes always require a human.
 AUTO_EXTENSIONS = {".md", ".rst", ".txt"}
 AUTO_DIRS = ("docs/", "skills/")
+# Even prose is bounded: a "documentation" change large enough to be a rewrite,
+# or one that touches many files at once, still gets a human.
+AUTO_MAX_PATHS = 3
+AUTO_MAX_DIFF_LINES = 120
 
 
 def _now() -> str:
@@ -316,13 +320,33 @@ class ImprovementController:
                     f"git -C <review-worktree> {build.get('test_cmd') or '<run deterministic tests>'}",
                     "# review, commit on a topic branch, then open/merge manually"]
         paths = build["paths"]
-        allowlisted = bool(paths) and all(
-            Path(p).suffix in AUTO_EXTENSIONS and p.startswith(AUTO_DIRS)
-            for p in paths)
+        diff_lines = len(build["diff"].splitlines())
+        allowlisted = (
+            bool(paths)
+            and len(paths) <= AUTO_MAX_PATHS
+            and diff_lines <= AUTO_MAX_DIFF_LINES
+            and all(Path(p).suffix in AUTO_EXTENSIONS and p.startswith(AUTO_DIRS)
+                    for p in paths)
+        )
         auto_approved = bool(automatic and allowlisted and not build["protected_paths"])
+        reasons = []
+        if automatic and not auto_approved:
+            if build["protected_paths"]:
+                reasons.append(f"protected paths: {build['protected_paths']}")
+            if not paths:
+                reasons.append("empty diff")
+            elif len(paths) > AUTO_MAX_PATHS:
+                reasons.append(f"{len(paths)} files > auto limit {AUTO_MAX_PATHS}")
+            elif diff_lines > AUTO_MAX_DIFF_LINES:
+                reasons.append(f"{diff_lines} diff lines > auto limit {AUTO_MAX_DIFF_LINES}")
+            else:
+                off = [p for p in paths if not (Path(p).suffix in AUTO_EXTENSIONS
+                                                and p.startswith(AUTO_DIRS))]
+                reasons.append(f"not prose-only: {off}")
         plan = {"at": _now(), "mode": "automatic-approval" if auto_approved else "manual",
                 "approved": auto_approved, "commands": commands, "source_worktree": wt,
                 "diff_hash": build["diff_hash"],
+                "manual_because": reasons or None,
                 "note": "approval record only; no merge, push, publish, restart, or active-plugin edit performed"}
         candidate["promotion"], candidate["status"] = plan, "promotion_approved" if auto_approved else "promotion_planned"
         self._save("promotion", {"id": candidate_id, "approved": auto_approved})

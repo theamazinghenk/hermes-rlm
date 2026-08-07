@@ -1236,6 +1236,17 @@ REFINE_SCHEMA = {
     "required": ["action"],
 }
 
+LIFECYCLE_SCHEMA = {
+    "type": "object", "properties": {
+        "action": {"type": "string", "enum": ["stage", "list", "get", "evaluate", "promote", "reject"]},
+        "scope": {"type": "string", "enum": ["session", "global"]},
+        "id": {"type": "string", "description": "Staged candidate id."},
+        "proposal": {"type": "object", "description": "For stage: {edits:[...]}"},
+        "suite": {"type": "object", "description": "Deterministic baseline/candidate scores and thresholds."},
+        "evidence": {"type": "string"}, "reason": {"type": "string"},
+    }, "required": ["action"],
+}
+
 _REFINE_PROMPT = """You maintain an agent's durable harness: small, reusable
 entries (kinds: prompt, memory, skill, subagent) that persist across sessions.
 Study the transcript and propose at most 4 edits that would genuinely help
@@ -1334,6 +1345,29 @@ def _refine_handler(args: dict, **kwargs) -> str:
         return _json({"ok": False, "error": f"model call unavailable: {exc}"})
 
 
+def _lifecycle_handler(args: dict, **kwargs) -> str:
+    session_id = str(kwargs.get("task_id") or "default")
+    scope = args.get("scope") or "session"
+    store = _harness.HarnessStore("global" if scope == "global" else session_id)
+    action, candidate_id = args.get("action"), args.get("id") or ""
+    try:
+        if action == "stage":
+            return _json({"ok": True, **store.stage(args.get("proposal") or {}, args.get("evidence") or "")})
+        if action == "list":
+            return _json({"ok": True, "candidates": store.candidates()})
+        if action == "get":
+            return _json({"ok": True, "candidate": store.candidates(candidate_id)})
+        if action == "evaluate":
+            return _json({"ok": True, **store.evaluate(candidate_id, args.get("suite") or {})})
+        if action == "promote":
+            return _json({"ok": True, **store.promote(candidate_id)})
+        if action == "reject":
+            return _json({"ok": True, **store.reject(candidate_id, args.get("reason") or "")})
+        raise ValueError("action must be stage/list/get/evaluate/promote/reject")
+    except (ValueError, KeyError, TypeError) as exc:
+        return _json({"ok": False, "error": str(exc)})
+
+
 def _harness_pre_llm_call(user_message: str, conversation_history: list,
                           is_first_turn: bool, model: str, platform: str,
                           session_id: str = "", **kwargs: Any) -> dict | None:
@@ -1428,6 +1462,13 @@ def register(ctx) -> None:
             ),
         )
     if FEATURE_REFINE:
+        ctx.register_tool(
+            name="rlm_eval", toolset="rlm", schema=LIFECYCLE_SCHEMA,
+            handler=_lifecycle_handler,
+            description=("Eval-gated refinement lifecycle: stage without mutation, "
+                         "evaluate deterministic JSON scores, promote only passing "
+                         "candidates, reject, and auto-rollback later regressions."),
+        )
         ctx.register_tool(
             name="rlm_refine",
             toolset="rlm",

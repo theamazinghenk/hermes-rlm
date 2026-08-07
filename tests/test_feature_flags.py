@@ -98,7 +98,7 @@ for key in list(env_on):
 out = subprocess.run([sys.executable, "-c", PROBE], capture_output=True,
                      text=True, env=env_on, timeout=120)
 d = json.loads(out.stdout.strip().splitlines()[-1])
-check("default registers all six tools", len(d["tools"]) == 6, str(d["tools"]))
+check("default registers all seven tools", len(d["tools"]) == 7, str(d["tools"]))
 check("default registers the harness hook", d["hooks"] == ["pre_llm_call"])
 check("default kernel does not refuse rlm_children",
       "refused" not in str(d["refused"].get("rlm_children()")),

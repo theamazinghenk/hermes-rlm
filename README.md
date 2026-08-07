@@ -47,7 +47,8 @@ it. `execute_code` stays the safe, ephemeral, secret-scrubbed default.
 | `rlm_reset` | Kill the kernel and discard all state |
 | `rlm_skills` | List Python-backed skills importable in the kernel |
 | `rlm_checkpoint` | Save/restore the namespace to disk so state survives a crash |
-| `rlm_refine` | Durable harness: distil transcript lessons into reversible entries |
+| `rlm_refine` | Backward-compatible durable harness: distil and immediately apply reversible entries |
+| `rlm_eval` | Stage, evaluate, promote/reject, and regression-rollback refinements |
 
 ## Inside the kernel
 
@@ -122,6 +123,17 @@ snapshotted in a ledger, and reversible with `rollback`. From inside the
 kernel, `harness_store()` gives direct CRUD access. This is a deliberate
 lite port of Prime Agent's continual harness: same invariants (immutable
 base prompt, evidence-backed edits, rollback), no daemon required.
+
+`rlm_refine` keeps its immediate-apply behavior for compatibility. Safer new
+work uses `rlm_eval`: `stage` persists a bounded proposal without changing
+active entries; `evaluate` consumes a deterministic JSON suite shaped as
+`{"cases":[{"baseline":0.7,"candidate":0.8}],"thresholds":{"min_candidate_mean":0.75,"min_mean_improvement":0.0,"max_case_regression":0.05}}`;
+`promote` requires the latest evaluation to pass; `reject` closes a staged
+candidate. Evaluating a promoted candidate again automatically rolls its
+refinement back when any configured threshold fails. Candidates and immutable
+evaluation records survive restarts under the existing HERMES_HOME-aware,
+atomic mode-0600 harness state. This lifecycle can only edit harness entries;
+it cannot modify base prompts, policy, source, permissions, releases or skills.
 
 The refine model call and the subagent fast path share one provider config
 (any OpenAI-compatible endpoint), set in the environment or `~/.hermes/.env`:

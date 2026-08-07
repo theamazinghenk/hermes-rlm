@@ -125,4 +125,28 @@ with tempfile.TemporaryDirectory() as tmp:
     except IntegrityError:
         pass
 
+with tempfile.TemporaryDirectory() as tmp:
+    # Auto-approval covers prose only: a candidate may never auto-approve a
+    # change to its own tests, or it can "improve" by deleting assertions.
+    home = Path(tmp) / "home"
+    ctl = ImprovementController(home)
+    repo = Path(tmp) / "repo"; repo.mkdir()
+    os.system(f"git -C {repo} init -q && git -C {repo} config user.email t@e && "
+              f"git -C {repo} config user.name t && touch {repo}/x && "
+              f"git -C {repo} add x && git -C {repo} commit -qm init")
+    wt = Path(tmp) / "wt"; wt.mkdir()
+
+    def build_for(path: str):
+        cand = ctl.classify(text="Traceback in api.py")
+        ctl.coder = lambda args, p=path: {
+            "ok": True, "worktree": str(wt), "tests_ok": True, "review": "LGTM",
+            "diff": f"--- a/{p}\n+++ b/{p}\n@@ -0,0 +1 @@\n+x\n"}
+        ctl.build(cand["id"], str(repo))
+        ctl.evaluate(cand["id"], {"baseline": {}, "candidate": {}, "thresholds": {}})
+        return ctl.promote(cand["id"], automatic=True)
+
+    assert build_for("docs/guide.md")["approved"], "prose should auto-approve"
+    assert not build_for("tests/test_kernel.py")["approved"], "tests must not auto-approve"
+    assert not build_for("kernel_server.py")["approved"], "source must not auto-approve"
+
 print("ok")

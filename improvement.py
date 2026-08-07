@@ -28,8 +28,11 @@ PROTECTED = (
     "approvals/", "evaluator", "evaluation/holdout", "holdout/", "SOUL.md",
     "AGENTS.md", "plugin.yaml", "improvement.py",
 )
+# Auto-approval is prose only. Tests are deliberately NOT auto-approvable: a
+# candidate that may rewrite its own examination can "improve" by deleting
+# assertions, so test changes always require a human.
 AUTO_EXTENSIONS = {".md", ".rst", ".txt"}
-AUTO_DIRS = ("docs/", "skills/", "tests/")
+AUTO_DIRS = ("docs/", "skills/")
 
 
 def _now() -> str:
@@ -314,8 +317,8 @@ class ImprovementController:
                     "# review, commit on a topic branch, then open/merge manually"]
         paths = build["paths"]
         allowlisted = bool(paths) and all(
-            (Path(p).suffix in AUTO_EXTENSIONS and p.startswith(AUTO_DIRS)) or
-            p.startswith("tests/") for p in paths)
+            Path(p).suffix in AUTO_EXTENSIONS and p.startswith(AUTO_DIRS)
+            for p in paths)
         auto_approved = bool(automatic and allowlisted and not build["protected_paths"])
         plan = {"at": _now(), "mode": "automatic-approval" if auto_approved else "manual",
                 "approved": auto_approved, "commands": commands, "source_worktree": wt,

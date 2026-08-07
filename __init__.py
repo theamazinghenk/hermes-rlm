@@ -24,6 +24,7 @@ import logging
 import os
 import secrets
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -101,6 +102,9 @@ FEATURE_PYTHON_SKILLS = _env("HERMES_RLM_ENABLE_PYTHON_SKILLS", "1") != "0"
 DEFAULT_EXEC_TIMEOUT = 300
 SUBAGENT_TIMEOUT = 900
 IDLE_SHUTDOWN_SECONDS = int(_env("HERMES_RLM_IDLE_SECONDS", "3600"))
+# Budget for the timeout salvage path: interrupt the runaway call, then pickle
+# a namespace that may be gigabytes. The old hardcoded 3s covered neither.
+SALVAGE_SECONDS = int(_env("HERMES_RLM_SALVAGE_SECONDS", "20"))
 
 # Resource ceilings. Without these one session can allocate until the machine
 # swaps, and a busy gateway can accumulate kernels until it runs out of file
@@ -885,35 +889,21 @@ class KernelHandle:
             reader = threading.Thread(target=_read, daemon=True)
             reader.start()
             if not done.wait(timeout):
-                # Last chance to save the namespace before the kernel dies:
-                # a timeout is exactly when expensive state is most costly to
-                # lose. Best-effort and short — the kernel is unresponsive, so
-                # this usually fails, but when the hang is in a worker thread
-                # rather than the main loop it succeeds and saves the load.
-                salvaged = None
-                try:
-                    if not FEATURE_CHECKPOINT:
-                        raise RuntimeError("checkpoint feature disabled")
-                    self.proc.stdin.write(json.dumps({
-                        "id": "salvage", "op": "checkpoint", "code": "",
-                        "session": self.session_id, "name": "autosave",
-                    }) + "\n")
-                    self.proc.stdin.flush()
-                    if done.wait(3):
-                        salvaged = "autosave"
-                except Exception:  # noqa: BLE001
-                    pass
-
+                salvaged = self._salvage(done)
                 self.shutdown()
-                message = (
-                    f"execution exceeded {timeout}s; kernel was killed and "
-                    "all in-memory state was lost"
-                )
                 if salvaged:
                     message = (
                         f"execution exceeded {timeout}s; kernel was killed. "
                         "State was salvaged to checkpoint 'autosave' — recover "
                         "it with rlm_checkpoint(action='restore', name='autosave')"
+                    )
+                else:
+                    message = (
+                        f"execution exceeded {timeout}s; kernel was killed and "
+                        "all in-memory state was lost. Salvage failed too, so "
+                        "check rlm_checkpoint(action='list') for an earlier "
+                        "checkpoint, and save one (rlm_checkpoint(action='save')) "
+                        "before the next long-running call"
                     )
                 return {"ok": False, "error": message}
 
@@ -921,6 +911,70 @@ class KernelHandle:
         if op == "exec":
             self.exec_count += 1
         return result
+
+    def _read_reply(self, budget: float, want_id: str) -> dict | None:
+        """Read one JSON reply with id `want_id` from the kernel within `budget`.
+
+        Matching on id matters: claiming a salvage on someone else's reply
+        would tell the model its state is safe when it is not.
+        """
+        holder: dict = {}
+        got = threading.Event()
+
+        def _pull() -> None:
+            try:
+                while True:
+                    line = self.proc.stdout.readline()
+                    if not line:
+                        return
+                    reply = json.loads(line)
+                    if reply.get("id") == want_id:
+                        holder["reply"] = reply
+                        return
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                got.set()
+
+        threading.Thread(target=_pull, daemon=True).start()
+        return holder.get("reply") if got.wait(budget) else None
+
+    def _salvage(self, done: threading.Event) -> bool:
+        """Interrupt a runaway call and checkpoint the namespace before dying.
+
+        A timeout is exactly when in-memory state is most expensive to lose,
+        but the kernel cannot answer a checkpoint request while it is still
+        inside the user's code — so interrupt FIRST (KeyboardInterrupt unwinds
+        `_run`, which catches BaseException and frees the main loop), THEN ask
+        for the autosave. Bounded by HERMES_RLM_SALVAGE_SECONDS throughout:
+        salvage must never turn one hang into two. Returns True only when the
+        kernel confirmed the checkpoint was written — the caller's message to
+        the model depends on that being the truth.
+        """
+        if not FEATURE_CHECKPOINT or self.proc.poll() is not None:
+            return False
+        deadline = time.monotonic() + max(SALVAGE_SECONDS, 1)
+        try:
+            self.proc.send_signal(signal.SIGINT)
+            # The interrupted call still owes us its (now failed) reply; the
+            # existing reader thread takes it, which is how we learn the main
+            # loop is free again.
+            if not done.wait(max(0.0, deadline - time.monotonic())):
+                # The interrupt did not land: `_read` still owns stdout. Adding
+                # a second reader here would race it for the checkpoint reply,
+                # so give up rather than risk a false "state was salvaged".
+                return False
+            if self.proc.poll() is not None:
+                return False
+            self.proc.stdin.write(json.dumps({
+                "id": "salvage", "op": "checkpoint", "code": "",
+                "session": self.session_id, "name": "autosave",
+            }) + "\n")
+            self.proc.stdin.flush()
+            reply = self._read_reply(max(0.5, deadline - time.monotonic()), "salvage")
+            return bool(reply and reply.get("ok"))
+        except Exception:  # noqa: BLE001 - caller falls back to the kill path
+            return False
 
     def shutdown(self) -> None:
         # Signal first, then close: the serve loop checks _stop before

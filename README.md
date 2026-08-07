@@ -224,6 +224,22 @@ release environment.
 
 ## Changelog
 
+### 0.6.0 — disciplined coding delegation
+
+New kernel primitive `coder(goal, repo, test_cmd="", context="")`: repo
+work becomes a fixed-discipline pipeline instead of hand-rolled terminal
+calls. It creates an **isolated git worktree**, runs a full Hermes agent
+in it (high reasoning, own tools/skills/rules — Hermes codes itself, no
+external CLI required), gates the result on `test_cmd` and feeds one
+bounded retry with the failure output, then returns the **diff + test
+report**. Nothing is merged automatically: the orchestrator reviews the
+diff and decides; the worktree is kept for inspection.
+
+Knobs: `HERMES_RLM_CODER_REASONING` (high), `HERMES_RLM_CODER_MAX_TURNS`
+(40), `HERMES_RLM_CODER_TIMEOUT` (900), `HERMES_RLM_CODER_RETRIES` (1),
+`HERMES_RLM_ENABLE_CODER=0` to disable, and `HERMES_RLM_CODER_CMD` as a
+`{workdir}`/`{prompt}` template to substitute a different worker CLI.
+
 ### 0.5.0 — warm resident workers
 
 Hermes already ships the daemon prime-agent needed a subsystem for: the

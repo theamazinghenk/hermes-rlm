@@ -461,9 +461,133 @@ def _list_subagents(limit: int = 20) -> dict:
     return {"ok": True, "children": children}
 
 
+FEATURE_CODER = _env("HERMES_RLM_ENABLE_CODER", "1") != "0"
+CODER_TIMEOUT = int(_env("HERMES_RLM_CODER_TIMEOUT", "900"))
+CODER_RETRIES = int(_env("HERMES_RLM_CODER_RETRIES", "1"))
+
+
+def _run_coder(args: dict) -> dict:
+    """Structured delegation to a coding CLI: worktree -> code -> test -> diff.
+
+    Turns ad-hoc coding delegation into a primitive with fixed discipline:
+    an isolated git worktree, a non-interactive HERMES run (the agent codes
+    with its own tools, skills and rules, at high reasoning), an optional
+    test gate whose failure output is fed back for a bounded retry, and a
+    diff-plus-report result. Merging is deliberately NOT done here — the
+    orchestrator reviews the diff and decides. A different worker CLI can
+    be substituted via HERMES_RLM_CODER_CMD ({workdir}/{prompt} template),
+    but the default is Hermes itself.
+    """
+    if not FEATURE_CODER:
+        return {"ok": False, "error": "coder is disabled by the operator "
+                                      "(HERMES_RLM_ENABLE_CODER=0)"}
+    goal = str(args.get("goal") or "").strip()
+    repo = str(args.get("repo") or "").strip()
+    test_cmd = str(args.get("test_cmd") or "").strip()
+    context = str(args.get("context") or "").strip()
+    if not goal or not repo:
+        return {"ok": False, "error": "goal and repo are required"}
+    repo_path = Path(repo).expanduser()
+    if not (repo_path / ".git").exists():
+        return {"ok": False, "error": f"{repo} is not a git repository"}
+
+    depth = int(os.environ.get(_DEPTH_ENV, "0"))
+    if depth >= MAX_RLM_DEPTH:
+        return {"ok": False, "error": f"delegation depth limit (depth={depth})"}
+
+    import shlex
+    override = _env("HERMES_RLM_CODER_CMD", "")
+    template = shlex.split(override) if override else None
+
+    worktree = Path(tempfile.mkdtemp(prefix="rlm_coder_"))
+    try:
+        wt = subprocess.run(["git", "-C", str(repo_path), "worktree", "add",
+                             "--detach", str(worktree)],
+                            capture_output=True, text=True, timeout=60)
+        if wt.returncode != 0:
+            return {"ok": False, "error": f"worktree failed: {wt.stderr[-400:]}"}
+
+        def run_coder_once(prompt: str) -> subprocess.CompletedProcess:
+            # The worktree instruction lives in the prompt, not just in cwd:
+            # tool configs may pin their own working directory, and absolute
+            # paths keep the worker honest about where it is allowed to write.
+            framed = (f"You are doing an isolated coding task in the git "
+                      f"worktree {worktree} (a scratch copy — commit nothing, "
+                      f"push nothing, work ONLY inside that directory, use "
+                      f"absolute paths).\n\n{prompt}")
+            if template:
+                cmd = [t.replace("{workdir}", str(worktree))
+                        .replace("{prompt}", framed) for t in template]
+            else:
+                cmd = [_hermes_cli(), "chat", "-q", framed, "-Q",
+                       "--reasoning", _env("HERMES_RLM_CODER_REASONING", "high"),
+                       "--max-turns", _env("HERMES_RLM_CODER_MAX_TURNS", "40")]
+            env = dict(os.environ)
+            env[_DEPTH_ENV] = str(depth + 1)
+            env["HERMES_DELEGATED_CHILD_CONTEXT"] = "1"
+            return subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=CODER_TIMEOUT, env=env,
+                                  cwd=str(worktree))
+
+        def run_tests() -> subprocess.CompletedProcess | None:
+            if not test_cmd:
+                return None
+            return subprocess.run(["/bin/sh", "-c", test_cmd],
+                                  capture_output=True, text=True,
+                                  timeout=CODER_TIMEOUT, cwd=str(worktree))
+
+        prompt = f"{goal}\n\nContext:\n{context}" if context else goal
+        attempts = 0
+        coder_tail = ""
+        tests_ok = None
+        test_tail = ""
+        while attempts <= CODER_RETRIES:
+            attempts += 1
+            proc = run_coder_once(prompt)
+            coder_tail = ((proc.stdout or "") + (proc.stderr or ""))[-3000:]
+            tests = run_tests()
+            if tests is None:
+                tests_ok = proc.returncode == 0
+                break
+            test_tail = ((tests.stdout or "") + (tests.stderr or ""))[-3000:]
+            tests_ok = tests.returncode == 0
+            if tests_ok:
+                break
+            prompt = (f"{goal}\n\nYour previous attempt is in this worktree "
+                      f"but the test command `{test_cmd}` FAILS with:\n"
+                      f"{test_tail}\n\nFix the code so the tests pass.")
+
+        diff = subprocess.run(["git", "-C", str(worktree), "diff", "HEAD"],
+                              capture_output=True, text=True, timeout=60)
+        status = subprocess.run(["git", "-C", str(worktree), "status", "--short"],
+                                capture_output=True, text=True, timeout=60)
+        diff_text = diff.stdout or ""
+        if len(diff_text) > 20000:
+            spill = worktree / "rlm_coder_full.diff"
+            spill.write_text(diff_text)
+            diff_text = (f"[diff is {len(diff_text)} chars — full version at "
+                         f"{spill}]\n" + diff_text[-20000:])
+        return {"ok": bool(tests_ok), "attempts": attempts,
+                "worktree": str(worktree), "tests_ok": tests_ok,
+                "test_cmd": test_cmd or None, "test_output": test_tail or None,
+                "diff": diff_text, "untracked": status.stdout or "",
+                "coder_output_tail": coder_tail[-1500:],
+                "note": "worktree kept for review; merge is the orchestrator's "
+                        "decision. Remove with: git worktree remove --force " +
+                        str(worktree)}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"coder exceeded {CODER_TIMEOUT}s",
+                "worktree": str(worktree)}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"coder failed: {exc}",
+                "worktree": str(worktree)}
+
+
 def _handle_delegate(args: dict) -> dict:
     """Serve `rlm()` / `rlm_many()` / spawn / wait / list from the kernel."""
     mode = str(args.get("mode") or "")
+    if mode == "coder":
+        return _run_coder(args)
     if mode == "spawn":
         tasks = args.get("tasks")
         if isinstance(tasks, list) and tasks:

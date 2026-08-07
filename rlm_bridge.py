@@ -191,6 +191,24 @@ def rlm_children(limit: int = 20):
     return _call("__rlm_delegate__", {"mode": "list", "limit": limit})
 
 
+def coder(goal: str, repo: str, test_cmd: str = "", context: str = ""):
+    """Delegate a repo coding task to Hermes itself, with fixed discipline.
+
+    Runs in an ISOLATED git worktree of `repo`: a full Hermes agent (high
+    reasoning, own tools/skills/rules) implements the goal; when `test_cmd`
+    is given it gates the result and one bounded retry feeds the failure
+    back. Returns {ok, attempts, worktree, diff, tests_ok, test_output,
+    note} — the diff is YOURS to review; nothing is merged automatically.
+    Prefer this over hand-rolled terminal calls for any substantive repo
+    change: the worktree keeps the repo safe and the test gate keeps you
+    honest.
+    """
+    _require("subagents")
+    return _call("__rlm_delegate__",
+                 {"mode": "coder", "goal": goal, "repo": repo,
+                  "test_cmd": test_cmd, "context": context})
+
+
 def harness_store(scope: str = "session"):
     """Direct access to the durable harness from inside the kernel.
 
@@ -209,5 +227,5 @@ def harness_store(scope: str = "session"):
 __all__ = [
     "read_file", "write_file", "search_files", "patch", "terminal",
     "web_search", "web_extract", "rlm", "rlm_many", "rlm_spawn", "rlm_wait",
-    "rlm_children", "harness_store", "RlmBridgeError",
+    "rlm_children", "coder", "harness_store", "RlmBridgeError",
 ]

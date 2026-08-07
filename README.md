@@ -224,6 +224,31 @@ release environment.
 
 ## Changelog
 
+### 0.5.0 — warm resident workers
+
+Hermes already ships the daemon prime-agent needed a subsystem for: the
+gateway. Run a second gateway on the minimal leaf profile with only its
+API server bound (e.g. port 8643) and it becomes a **resident worker**:
+agent-loop init is paid once at its start, so a blocking `rlm()` call
+costs roughly model time.
+
+```bash
+# ~/.hermes/.env
+HERMES_RLM_WARM_URL=http://127.0.0.1:8643
+```
+
+Measured: 8.6–12s cold CLI spawn → **1.8–5.1s** per full agent run. Any
+failure (gateway down, empty reply) falls back to the CLI spawn silently,
+so the warm lane can only make delegation faster, never less reliable.
+`rlm_spawn` keeps using detached CLI children (surviving restarts is the
+point there). Setup notes for the leaf gateway live in the section below;
+supervision is plain launchd/systemd KeepAlive — no custom daemon code.
+
+Caveats: the warm gateway needs its own provider config (the gateway path
+does not inherit the main config's providers), its own `.env` WITHOUT your
+messaging tokens (a second Telegram poller would conflict with your main
+gateway), and a separate API port.
+
 ### 0.4.1 — enforceable feature selection
 
 - **Hard feature flags** (the last fleet-review blocker): setting

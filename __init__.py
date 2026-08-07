@@ -185,6 +185,49 @@ def _subagent_env(depth: int) -> dict:
     return env
 
 
+def _warm_subagent(goal: str, context: str, timeout: int) -> dict | None:
+    """Run the goal on the warm leaf gateway when one is configured.
+
+    A second Hermes gateway on the minimal leaf profile is a resident
+    worker: agent-loop init is paid once at ITS start, so a blocking
+    subagent costs roughly model time instead of a ~9s cold CLI boot.
+    Point HERMES_RLM_WARM_URL at its api_server (e.g. http://127.0.0.1:8643);
+    auth reuses API_SERVER_KEY. Returns None when unconfigured, unreachable
+    or the reply is unusable — the caller falls back to the CLI spawn, so
+    the warm lane can never make delegation less reliable, only faster.
+    """
+    url = _env("HERMES_RLM_WARM_URL", "").rstrip("/")
+    if not url:
+        return None
+    key = _fast_path._read_env_key("API_SERVER_KEY")
+    if not key:
+        return None
+    import urllib.error
+    import urllib.request
+    prompt = f"{goal}\n\nContext:\n{context}" if context.strip() else goal
+    payload = json.dumps({
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 8000,
+    }).encode()
+    request = urllib.request.Request(
+        f"{url}/v1/chat/completions", data=payload,
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {key}"})
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = json.loads(response.read().decode())
+        summary = body["choices"][0]["message"]["content"]
+    except Exception as exc:  # noqa: BLE001 - any failure means: use the CLI
+        logger.debug("warm subagent unavailable, falling back to CLI: %s", exc)
+        return None
+    if not isinstance(summary, str) or not summary.strip():
+        return None
+    return {"ok": True, "goal": goal, "summary": summary.strip(),
+            "session_id": None, "exit_code": 0, "warm": True,
+            "duration_seconds": round(time.monotonic() - started, 1)}
+
+
 def _run_subagent(goal: str, context: str = "", timeout: int = SUBAGENT_TIMEOUT,
                   fast: bool = False) -> dict:
     """Run ONE real Hermes subagent to completion and return its summary.
@@ -215,6 +258,10 @@ def _run_subagent(goal: str, context: str = "", timeout: int = SUBAGENT_TIMEOUT,
             return _fast_path.run(goal, context)
         except _fast_path.FastPathUnavailable as exc:
             logger.debug("fast path unavailable, using full agent: %s", exc)
+
+    warm = _warm_subagent(goal, context, min(timeout, 600))
+    if warm is not None:
+        return warm
 
     prompt = f"{goal}\n\nContext:\n{context}" if context.strip() else goal
     env = _subagent_env(depth)

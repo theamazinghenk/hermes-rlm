@@ -191,7 +191,22 @@ def rlm_children(limit: int = 20):
     return _call("__rlm_delegate__", {"mode": "list", "limit": limit})
 
 
-def coder(goal: str, repo: str, test_cmd: str = "", context: str = ""):
+def coder_many(tasks: list):
+    """Run several INDEPENDENT coding tasks in parallel worktrees (swarm).
+
+    `tasks` is a list of dicts: {goal, repo, test_cmd?, context?}. Each gets
+    its own isolated worktree and worker (max 3 concurrent by default —
+    coding runs are heavy). Also the best-of-N pattern: submit the same
+    goal N times and pick the strongest diff. Returns {results, ...} in
+    task order. NEVER give two tasks overlapping edit scopes in the same
+    repo — parallel writers on shared files is how merge hell starts.
+    """
+    _require("subagents")
+    return _call("__rlm_delegate__", {"mode": "coder", "tasks": tasks})
+
+
+def coder(goal: str, repo: str, test_cmd: str = "", context: str = "",
+          skip_review: bool = False):
     """Delegate a repo coding task to Hermes itself, with fixed discipline.
 
     Runs in an ISOLATED git worktree of `repo`: a full Hermes agent (high
@@ -201,12 +216,14 @@ def coder(goal: str, repo: str, test_cmd: str = "", context: str = ""):
     note} — the diff is YOURS to review; nothing is merged automatically.
     Prefer this over hand-rolled terminal calls for any substantive repo
     change: the worktree keeps the repo safe and the test gate keeps you
-    honest.
+    honest. A second agent adversarially reviews the diff (field `review`,
+    advisory; disable per call with skip_review=True).
     """
     _require("subagents")
     return _call("__rlm_delegate__",
                  {"mode": "coder", "goal": goal, "repo": repo,
-                  "test_cmd": test_cmd, "context": context})
+                  "test_cmd": test_cmd, "context": context,
+                  "skip_review": skip_review})
 
 
 def harness_store(scope: str = "session"):
@@ -227,5 +244,5 @@ def harness_store(scope: str = "session"):
 __all__ = [
     "read_file", "write_file", "search_files", "patch", "terminal",
     "web_search", "web_extract", "rlm", "rlm_many", "rlm_spawn", "rlm_wait",
-    "rlm_children", "coder", "harness_store", "RlmBridgeError",
+    "rlm_children", "coder", "coder_many", "harness_store", "RlmBridgeError",
 ]

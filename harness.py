@@ -41,22 +41,29 @@ class HarnessStore:
     def __init__(self, scope_dir: str) -> None:
         self.dir = HARNESS_ROOT / scope_dir
         self.path = self.dir / "harness_state.json"
-        self._mtime: float = -1.0
+        self._mtime: tuple[int, int] = (-1, -1)
         self._state: dict = {"schema": 1, "entries": {}, "refinements": []}
         self._sync()
 
     # --- persistence ------------------------------------------------------
 
     def _sync(self) -> None:
-        """Reload from disk when another writer (host or kernel) changed it."""
+        """Reload from disk when another writer (host or kernel) changed it.
+
+        Identity is (mtime_ns, size), not mtime: on filesystems with coarse
+        timestamp resolution several consecutive writes share one mtime, so
+        a second writer's changes would be invisible. Reported by a fleet
+        operator who reproduced it with five writes in a row.
+        """
         try:
-            mtime = self.path.stat().st_mtime
+            st = self.path.stat()
+            token = (st.st_mtime_ns, st.st_size)
         except OSError:
             return
-        if mtime != self._mtime:
+        if token != self._mtime:
             try:
                 self._state = json.loads(self.path.read_text())
-                self._mtime = mtime
+                self._mtime = token
             except (OSError, json.JSONDecodeError):
                 pass  # keep in-memory state; next write repairs the file
 
@@ -67,7 +74,8 @@ class HarnessStore:
         os.chmod(tmp, 0o600)
         tmp.replace(self.path)
         try:
-            self._mtime = self.path.stat().st_mtime
+            st = self.path.stat()
+            self._mtime = (st.st_mtime_ns, st.st_size)
         except OSError:
             pass
 

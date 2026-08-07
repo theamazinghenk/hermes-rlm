@@ -224,6 +224,32 @@ release environment.
 
 ## Changelog
 
+### 0.6.1 — fleet-reported fixes + coding swarm
+
+Two real bugs found by a fleet operator running this on Hermes v0.19.0
+(thanks!):
+
+- **Harness sync missed writes on coarse-mtime filesystems.** `_sync()`
+  compared `st_mtime` only, so several consecutive writes sharing one
+  timestamp made a second writer's changes invisible. Identity is now
+  `(st_mtime_ns, st_size)`; `tests/test_harness.py` reproduces the
+  five-rapid-writes scenario.
+- **`--reasoning` does not exist on older Hermes CLIs**, and argparse
+  rejected it with exit 2 — every subagent failed silently in 0.2s. Child
+  flags are now capability-probed against `hermes chat --help` (cached,
+  fails open), so the plugin only sends flags the installed CLI accepts.
+
+Also new:
+
+- `coder_many([{goal, repo, test_cmd}, ...])` — independent coding tasks
+  in parallel worktrees (default 3 concurrent, `HERMES_RLM_CODER_PARALLEL`).
+  Same call shape doubles as best-of-N: submit one goal N times, pick the
+  strongest diff. Never give two tasks overlapping edit scopes.
+- **Automatic adversarial review**: every `coder()` result carries a
+  `review` field from a second agent that attacks the diff (advisory —
+  the test gate still owns `ok`). Disable per call with `skip_review=True`
+  or globally via `HERMES_RLM_CODER_REVIEW=0`.
+
 ### 0.6.0 — disciplined coding delegation
 
 New kernel primitive `coder(goal, repo, test_cmd="", context="")`: repo

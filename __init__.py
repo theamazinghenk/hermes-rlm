@@ -143,6 +143,29 @@ def _hermes_cli() -> str:
     raise RuntimeError("hermes CLI not found next to sys.executable or on PATH")
 
 
+_cli_flags_cache: set[str] | None = None
+
+
+def _cli_supports(flag: str) -> bool:
+    """Does this Hermes CLI accept `flag`? Cached; fails open.
+
+    Older Hermes versions lack --reasoning; passing it made argparse exit 2
+    and every subagent failed silently in 0.2s. Reported by a fleet operator
+    on v0.19.0. Probe once, then only send flags the CLI actually knows.
+    """
+    global _cli_flags_cache
+    if _cli_flags_cache is None:
+        try:
+            out = subprocess.run([_hermes_cli(), "chat", "--help"],
+                                 capture_output=True, text=True, timeout=30)
+            _cli_flags_cache = {tok.split("=")[0].rstrip(",")
+                                for tok in (out.stdout + out.stderr).split()
+                                if tok.startswith("--")}
+        except Exception:  # noqa: BLE001 - unknown CLI: assume modern
+            _cli_flags_cache = set()
+    return not _cli_flags_cache or flag in _cli_flags_cache
+
+
 def _subagent_flags() -> list[str]:
     """Extra CLI flags for child agents: think less, cap the loop.
 
@@ -159,10 +182,10 @@ def _subagent_flags() -> list[str]:
     if _env("HERMES_RLM_CHILD_IGNORE_RULES", "0") == "1":
         flags.append("--ignore-rules")
     reasoning = _env("HERMES_RLM_CHILD_REASONING", "low")
-    if reasoning and reasoning != "0":
+    if reasoning and reasoning != "0" and _cli_supports("--reasoning"):
         flags += ["--reasoning", reasoning]
     max_turns = _env("HERMES_RLM_CHILD_MAX_TURNS", "25")
-    if max_turns and max_turns != "0":
+    if max_turns and max_turns != "0" and _cli_supports("--max-turns"):
         flags += ["--max-turns", max_turns]
     return flags
 
@@ -464,6 +487,30 @@ def _list_subagents(limit: int = 20) -> dict:
 FEATURE_CODER = _env("HERMES_RLM_ENABLE_CODER", "1") != "0"
 CODER_TIMEOUT = int(_env("HERMES_RLM_CODER_TIMEOUT", "900"))
 CODER_RETRIES = int(_env("HERMES_RLM_CODER_RETRIES", "1"))
+CODER_PARALLEL = int(_env("HERMES_RLM_CODER_PARALLEL", "3"))
+CODER_REVIEW = _env("HERMES_RLM_CODER_REVIEW", "1") != "0"
+
+
+def _review_diff(goal: str, diff: str, test_note: str) -> str | None:
+    """Adversarial second pair of eyes on a coder diff (swarm role).
+
+    Uses the warm lane when available, the CLI otherwise. Advisory only:
+    the verdict travels with the report; ok stays owned by the test gate.
+    """
+    prompt = (
+        "You are an adversarial code reviewer. Below is the goal and the "
+        "diff a coding agent produced. Find real problems: bugs, missed "
+        "edge cases, scope creep, style breaks with the surrounding code. "
+        "Answer with 'LGTM' if it is genuinely fine, otherwise 3 bullet "
+        "points max, most severe first.\n\n"
+        f"GOAL: {goal}\n{test_note}\n\nDIFF:\n{diff[:12000]}")
+    try:
+        result = _run_subagent(prompt, "", timeout=300, fast=False)
+        if result.get("ok") and result.get("summary"):
+            return str(result["summary"])[:1500]
+    except Exception:  # noqa: BLE001 - review is advisory, never blocking
+        pass
+    return None
 
 
 def _run_coder(args: dict) -> dict:
@@ -519,9 +566,13 @@ def _run_coder(args: dict) -> dict:
                 cmd = [t.replace("{workdir}", str(worktree))
                         .replace("{prompt}", framed) for t in template]
             else:
-                cmd = [_hermes_cli(), "chat", "-q", framed, "-Q",
-                       "--reasoning", _env("HERMES_RLM_CODER_REASONING", "high"),
-                       "--max-turns", _env("HERMES_RLM_CODER_MAX_TURNS", "40")]
+                cmd = [_hermes_cli(), "chat", "-q", framed, "-Q"]
+                if _cli_supports("--reasoning"):
+                    cmd += ["--reasoning",
+                            _env("HERMES_RLM_CODER_REASONING", "high")]
+                if _cli_supports("--max-turns"):
+                    cmd += ["--max-turns",
+                            _env("HERMES_RLM_CODER_MAX_TURNS", "40")]
             env = dict(os.environ)
             env[_DEPTH_ENV] = str(depth + 1)
             env["HERMES_DELEGATED_CHILD_CONTEXT"] = "1"
@@ -567,10 +618,17 @@ def _run_coder(args: dict) -> dict:
             spill.write_text(diff_text)
             diff_text = (f"[diff is {len(diff_text)} chars — full version at "
                          f"{spill}]\n" + diff_text[-20000:])
+        review = None
+        if CODER_REVIEW and not args.get("skip_review") and diff_text.strip():
+            test_note = (f"Tests ({test_cmd}): "
+                         f"{'PASS' if tests_ok else 'FAIL'}" if test_cmd
+                         else "No test gate was configured.")
+            review = _review_diff(goal, diff_text, test_note)
         return {"ok": bool(tests_ok), "attempts": attempts,
                 "worktree": str(worktree), "tests_ok": tests_ok,
                 "test_cmd": test_cmd or None, "test_output": test_tail or None,
                 "diff": diff_text, "untracked": status.stdout or "",
+                "review": review,
                 "coder_output_tail": coder_tail[-1500:],
                 "note": "worktree kept for review; merge is the orchestrator's "
                         "decision. Remove with: git worktree remove --force " +
@@ -587,6 +645,15 @@ def _handle_delegate(args: dict) -> dict:
     """Serve `rlm()` / `rlm_many()` / spawn / wait / list from the kernel."""
     mode = str(args.get("mode") or "")
     if mode == "coder":
+        tasks = args.get("tasks")
+        if isinstance(tasks, list) and tasks:
+            workers = min(len(tasks), CODER_PARALLEL)
+            started = time.monotonic()
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_run_coder, dict(t)) for t in tasks]
+                results = [f.result() for f in futures]
+            return {"results": results, "parallel_workers": workers,
+                    "wall_seconds": round(time.monotonic() - started, 1)}
         return _run_coder(args)
     if mode == "spawn":
         tasks = args.get("tasks")

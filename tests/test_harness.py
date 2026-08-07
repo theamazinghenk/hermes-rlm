@@ -49,6 +49,16 @@ other.create("skill", "Recept", "Stap 1 doe X. Stap 2 doe Y.")
 check("second writer visible after sync", len(store.entries()) == 2,
       str(len(store.entries())))
 
+# Regression: on coarse-mtime filesystems consecutive writes share a
+# timestamp, so identity must include size/ns (fleet report, 2026-08-07).
+rapid = harness.HarnessStore(scope)
+before = len(store.entries())
+for i in range(5):
+    rapid.create("memory", f"rapid-{i}", f"snelle write {i}")
+    seen = len(store.entries())
+    check(f"rapid write {i+1} visible to the other writer", seen == before + i + 1,
+          f"zag {seen}, verwacht {before + i + 1}")
+
 # --- proposal + rollback ----------------------------------------------------
 proposal = {"edits": [
     {"op": "create", "kind": "prompt", "title": "Regel", "content": "Meet eerst."},

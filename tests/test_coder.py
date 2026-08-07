@@ -59,6 +59,7 @@ fi
 worker.chmod(worker.stat().st_mode | stat.S_IEXEC)
 
 os.environ["HERMES_RLM_CODER_CMD"] = f"{worker} {{workdir}} {{prompt}}"
+os.environ["HERMES_RLM_CODER_REVIEW"] = "0"  # review needs a live model; off here
 
 # --- 1. happy path with retry: fail once, pass on attempt 2 ------------------
 
@@ -98,6 +99,35 @@ plugin.FEATURE_CODER = False
 r = plugin._run_coder({"goal": "x", "repo": str(repo)})
 check("feature flag disables coder", not r.get("ok") and "disabled" in r.get("error", ""))
 plugin.FEATURE_CODER = True
+
+# --- 4. swarm: parallel independent tasks in separate worktrees --------------
+
+plugin.FEATURE_CODER = True
+os.environ.pop(plugin._DEPTH_ENV, None)
+# Two independent repos so the parallel workers never share edit scope.
+repo2 = tmp / "repo2"
+repo2.mkdir()
+subprocess.run(["git", "-C", str(repo2), "init", "-q"], check=True)
+(repo2 / "app.py").write_text("VALUE = 1\n")
+subprocess.run(["git", "-C", str(repo2), "add", "-A"], check=True)
+subprocess.run(["git", "-C", str(repo2), "-c", "user.email=t@t", "-c",
+                "user.name=t", "commit", "-q", "-m", "init"], check=True)
+
+batch = plugin._handle_delegate({"mode": "coder", "tasks": [
+    {"goal": "a", "repo": str(repo), "test_cmd": "grep -q 'VALUE = 3' app.py"},
+    {"goal": "b", "repo": str(repo2), "test_cmd": "grep -q 'VALUE = 3' app.py"},
+]})
+check("swarm returns per-task results", len(batch.get("results", [])) == 2, str(batch)[:120])
+check("swarm ran in parallel", batch.get("parallel_workers") == 2)
+check("both worktrees isolated from origins",
+      (repo / "app.py").read_text() == "VALUE = 1\n"
+      and (repo2 / "app.py").read_text() == "VALUE = 1\n")
+for res in batch.get("results", []):
+    wt = res.get("worktree")
+    if wt:
+        origin = str(repo) if "repo2" not in wt else str(repo2)
+        subprocess.run(["git", "-C", origin, "worktree", "remove", "--force", wt],
+                       capture_output=True)
 
 import shutil
 shutil.rmtree(tmp, ignore_errors=True)

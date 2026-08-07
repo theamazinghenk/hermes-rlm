@@ -55,6 +55,7 @@ _skill_loader = _load_local_module("hermes_rlm_skill_loader", "skill_loader.py")
 _checkpoint = _load_local_module("hermes_rlm_checkpoint", "checkpoint.py")
 _fast_path = _load_local_module("hermes_rlm_fast_path", "fast_path.py")
 _harness = _load_local_module("hermes_rlm_harness", "harness.py")
+_improvement = _load_local_module("hermes_rlm_improvement", "improvement.py")
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,7 @@ _BRIDGE_MODULE = _HERE / "rlm_bridge.py"
 # (see _run_subagent) rather than forking Hermes core.
 ALLOWED_TOOLS = frozenset({
     "web_search", "web_extract", "read_file", "write_file",
-    "search_files", "patch", "terminal",
+    "search_files", "patch", "terminal", "rlm_improve",
 })
 
 # Sentinel the bridge sends for delegation; handled locally, never dispatched.
@@ -93,6 +94,7 @@ def _env(name: str, default: str) -> str:
 # only) actually enforceable rather than a README suggestion.
 FEATURE_CHECKPOINT = _env("HERMES_RLM_ENABLE_CHECKPOINT", "1") != "0"
 FEATURE_REFINE = _env("HERMES_RLM_ENABLE_REFINE", "1") != "0"
+FEATURE_IMPROVE = _env("HERMES_RLM_ENABLE_IMPROVE", "1") != "0"
 FEATURE_SUBAGENTS = _env("HERMES_RLM_ENABLE_SUBAGENTS", "1") != "0"
 FEATURE_PYTHON_SKILLS = _env("HERMES_RLM_ENABLE_PYTHON_SKILLS", "1") != "0"
 
@@ -1247,6 +1249,24 @@ LIFECYCLE_SCHEMA = {
     }, "required": ["action"],
 }
 
+IMPROVE_SCHEMA = {
+    "type": "object", "properties": {
+        "action": {"type": "string", "enum": ["observe", "list", "get", "classify",
+            "build", "evaluate", "promote", "reject", "rollback", "export", "import",
+            "verify", "compatibility"]},
+        "id": {"type": "string"}, "text": {"type": "string"}, "evidence": {},
+        "kind": {"type": "string"}, "repo": {"type": "string"},
+        "goal": {"type": "string"}, "test_cmd": {"type": "string"},
+        "context": {"type": "string"}, "manifest": {"type": "object"},
+        "canary_command": {"type": "string"}, "automatic": {"type": "boolean"},
+        "reason": {"type": "string"}, "commit": {"type": "string"},
+        "destination": {"type": "string"}, "source": {"type": "string"},
+        "hermes_version": {"type": "string"}, "plugin_version": {"type": "string"},
+        "import_ok": {"type": "boolean"}, "tool_registered": {"type": "boolean"},
+        "detail": {"type": "string"}, "observation_only": {"type": "boolean"},
+    }, "required": ["action"],
+}
+
 _REFINE_PROMPT = """You maintain an agent's durable harness: small, reusable
 entries (kinds: prompt, memory, skill, subagent) that persist across sessions.
 Study the transcript and propose at most 4 edits that would genuinely help
@@ -1368,6 +1388,20 @@ def _lifecycle_handler(args: dict, **kwargs) -> str:
         return _json({"ok": False, "error": str(exc)})
 
 
+def _improve_handler(args: dict, **kwargs) -> str:
+    try:
+        controller = _improvement.ImprovementController(coder=_run_coder)
+        action = str(args.get("action") or "")
+        values = {k: v for k, v in args.items() if k != "action" and v is not None}
+        if "id" in values:
+            values["candidate_id" if action in {"build", "evaluate", "promote", "reject", "rollback"}
+                   else "observation_id" if action == "classify" else "item_id"] = values.pop("id")
+        result = controller.dispatch(action, **values)
+        return _json({"ok": True, "result": result})
+    except (ValueError, KeyError, TypeError, RuntimeError) as exc:
+        return _json({"ok": False, "error": str(exc)})
+
+
 def _harness_pre_llm_call(user_message: str, conversation_history: list,
                           is_first_turn: bool, model: str, platform: str,
                           session_id: str = "", **kwargs: Any) -> dict | None:
@@ -1486,3 +1520,11 @@ def register(ctx) -> None:
         )
         if hasattr(ctx, "register_hook"):
             ctx.register_hook("pre_llm_call", _harness_pre_llm_call)
+    if FEATURE_IMPROVE:
+        ctx.register_tool(
+            name="rlm_improve", toolset="rlm", schema=IMPROVE_SCHEMA,
+            handler=_improve_handler,
+            description=("Durable deterministic self-improvement controller. Builds code "
+                         "only in coder worktrees and records promotion/rollback plans; "
+                         "never merges, pushes, publishes, restarts, or overwrites runtime."),
+        )

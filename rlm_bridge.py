@@ -226,6 +226,11 @@ def coder(goal: str, repo: str, test_cmd: str = "", context: str = "",
                   "skip_review": skip_review})
 
 
+def rlm_improve(action: str, **kwargs):
+    """Call the host's durable, eval-gated self-improvement controller."""
+    return _call("rlm_improve", {"action": action, **kwargs})
+
+
 def harness_store(scope: str = "session"):
     """Direct access to the durable harness from inside the kernel.
 
@@ -241,8 +246,15 @@ def harness_store(scope: str = "session"):
     return HarnessStore(sid)
 
 
+def improvement_store():
+    """Open durable self-improvement state from inside the kernel."""
+    from improvement import ImprovementController
+    return ImprovementController()
+
+
 __all__ = [
     "read_file", "write_file", "search_files", "patch", "terminal",
     "web_search", "web_extract", "rlm", "rlm_many", "rlm_spawn", "rlm_wait",
-    "rlm_children", "coder", "coder_many", "harness_store", "RlmBridgeError",
+    "rlm_children", "coder", "coder_many", "harness_store", "improvement_store",
+    "rlm_improve", "RlmBridgeError",
 ]

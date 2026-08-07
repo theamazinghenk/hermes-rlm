@@ -68,6 +68,7 @@ env_off = {
     "HERMES_HOME": tempfile.mkdtemp(prefix="rlm_ff_home_"),
     "HERMES_RLM_ENABLE_CHECKPOINT": "0",
     "HERMES_RLM_ENABLE_REFINE": "0",
+    "HERMES_RLM_ENABLE_IMPROVE": "0",
     "HERMES_RLM_ENABLE_SUBAGENTS": "0",
     "HERMES_RLM_ENABLE_PYTHON_SKILLS": "0",
 }
@@ -80,7 +81,7 @@ except (json.JSONDecodeError, IndexError):
     sys.exit(1)
 
 check("only exec/vars/reset registered",
-      sorted(d["tools"]) == ["rlm_exec", "rlm_reset", "rlm_vars"], str(d["tools"]))
+      d["tools"] == ["rlm_exec", "rlm_vars", "rlm_reset"], str(d["tools"]))
 check("no pre_llm_call hook registered", d["hooks"] == [], str(d["hooks"]))
 for fn, res in d["refused"].items():
     check(f"kernel refuses {fn}", "refused" in str(res) and "operator" in str(res),
@@ -98,7 +99,7 @@ for key in list(env_on):
 out = subprocess.run([sys.executable, "-c", PROBE], capture_output=True,
                      text=True, env=env_on, timeout=120)
 d = json.loads(out.stdout.strip().splitlines()[-1])
-check("default registers all seven tools", len(d["tools"]) == 7, str(d["tools"]))
+check("default registers all eight tools", len(d["tools"]) == 8, str(d["tools"]))
 check("default registers the harness hook", d["hooks"] == ["pre_llm_call"])
 check("default kernel does not refuse rlm_children",
       "refused" not in str(d["refused"].get("rlm_children()")),

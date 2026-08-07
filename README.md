@@ -49,6 +49,21 @@ it. `execute_code` stays the safe, ephemeral, secret-scrubbed default.
 | `rlm_checkpoint` | Save/restore the namespace to disk so state survives a crash |
 | `rlm_refine` | Backward-compatible durable harness: distil and immediately apply reversible entries |
 | `rlm_eval` | Stage, evaluate, promote/reject, and regression-rollback refinements |
+| `rlm_improve` | Durable observations, isolated builds, deterministic gates, manual promotion/rollback plans, and signed state export/import |
+
+## Self-improvement (0.8.0)
+
+`rlm_improve` stores observations and candidate history under
+`$HERMES_HOME/state/rlm/improvement`, independent of plugin reinstalls. Code
+candidates use the existing `coder` isolated-worktree primitive. Evaluation
+requires explicit baseline/candidate metrics, build/test/review gates, protected
+path checks, and an optional secret-stripped canary with an isolated
+`HERMES_HOME`. Export/import archives are integrity checked and state files are
+atomically written with mode `0600` under mode `0700` directories.
+
+Promotion and rollback return review commands only. The controller never merges,
+pushes, publishes, restarts Hermes, or edits the active plugin, evaluator,
+security policy, deployment, release, or approval surfaces.
 
 ## Inside the kernel
 

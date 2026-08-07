@@ -29,7 +29,7 @@ TOKEN = secrets.token_urlsafe(16)
 tmpdir = tempfile.mkdtemp(prefix="rlm_bridge_test_")
 sock_path = os.path.join(tmpdir, "rpc.sock")
 dispatched: list[dict] = []
-ALLOWED = {"read_file", "terminal", "__rlm_delegate__"}
+ALLOWED = {"read_file", "terminal", "rlm_improve", "__rlm_delegate__"}
 
 
 def serve(server_sock: socket.socket, stop: threading.Event) -> None:
@@ -70,6 +70,8 @@ def serve(server_sock: socket.socket, stop: threading.Event) -> None:
                                          for t in args["tasks"]]}
                 else:
                     reply = {"ok": True, "summary": f"handled: {args.get('goal')}"}
+            elif tool == "rlm_improve":
+                reply = {"ok": True, "action": req["args"]["action"]}
             else:
                 reply = {"echo": req.get("args")}
             conn.sendall((json.dumps(reply) + "\n").encode())
@@ -121,6 +123,9 @@ try:
     r = run("len(rlm_many([{'goal': 'a'}, {'goal': 'b'}])['results'])")
     assert r["value"] == "2", r
     assert dispatched[-1]["args"]["tasks"][1]["goal"] == "b"
+
+    r = run("rlm_improve('verify')['action']")
+    assert r["value"] == "'verify'", r
 
     # 4. Results are ordinary Python objects, so they compose in the kernel.
     run("findings = [rlm(f'check {n}')['summary'] for n in ('x', 'y')]")

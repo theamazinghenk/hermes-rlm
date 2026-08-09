@@ -197,20 +197,11 @@ def _subagent_flags() -> list[str]:
 
 
 def _subagent_env(depth: int) -> dict:
-    """Environment for a spawned subagent CLI process.
-
-    Marks the child as a delegated context (blocks kanban mutations) and
-    routes it to the minimal ``rlm-leaf`` profile when one exists: no MCP
-    spawns, no memory/hindsight, no plugin load — leaf work needs none of it
-    and every skipped subsystem is startup time. Opt out or rename via
-    ``HERMES_RLM_LEAF_PROFILE`` (set to ``0`` to inherit the parent profile).
-    """
+    """Environment for a child that inherits the active main profile/model."""
     env = dict(os.environ)
     env[_DEPTH_ENV] = str(depth + 1)
     env["HERMES_DELEGATED_CHILD_CONTEXT"] = "1"
-    leaf = _env("HERMES_RLM_LEAF_PROFILE", "rlm-leaf")
-    if leaf and leaf != "0" and (_hermes_home() / "profiles" / leaf).is_dir():
-        env["HERMES_PROFILE"] = leaf
+    env.pop("HERMES_PROFILE", None)
     return env
 
 
@@ -280,17 +271,10 @@ def _run_subagent(goal: str, context: str = "", timeout: int = SUBAGENT_TIMEOUT,
                      f"max={MAX_RLM_DEPTH})",
         }
 
-    # Fast path: skip ~14s of agent-loop startup when no tools are needed.
-    # Any failure falls through to the full agent rather than degrading.
-    if fast and _fast_path.eligible(goal, context):
-        try:
-            return _fast_path.run(goal, context)
-        except _fast_path.FastPathUnavailable as exc:
-            logger.debug("fast path unavailable, using full agent: %s", exc)
-
-    warm = _warm_subagent(goal, context, min(timeout, 600))
-    if warm is not None:
-        return warm
+    # RLM workers must follow the active main model/provider. Dedicated fast
+    # and warm endpoints can silently drift to a different model, so retain
+    # `fast` only for API compatibility and always spawn the inherited CLI.
+    del fast
 
     prompt = f"{goal}\n\nContext:\n{context}" if context.strip() else goal
     env = _subagent_env(depth)

@@ -249,6 +249,30 @@ self-contained suites across Python 3.11–3.13 with both RSS policies in an
 empty `HERMES_HOME`; suites that exercise a live Hermes CLI run in the
 release environment.
 
+## Restarting the gateway reliably
+
+`launchctl kickstart -k` (and `systemctl restart`) start the replacement
+while the old instance's sockets can still be in TIME_WAIT. Hermes' API
+server treats a bind failure as **permanent** (`retryable=False` in
+`gateway/platforms/api_server.py`), so the gateway then runs for hours
+*without* its API — messaging platforms keep working, which is why nobody
+notices. Observed in the wild: 9 hours down.
+
+`scripts/hermes-restart.sh` does it properly: stop → wait until the port is
+genuinely free (killing only leftover gateway listeners) → start → verify
+`/health`, with one automatic second pass if the API did not come up.
+
+```bash
+scripts/hermes-restart.sh                      # 25s on the reference machine
+scripts/hermes-restart.sh --detached           # when an agent restarts itself
+scripts/hermes-restart.sh ai.hermes.gateway.leaf 8643
+```
+
+`--detached` matters inside an agent turn: SIGTERM propagates to the process
+group, so a foreground restart kills the very process that issued it. The
+script uses `setsid` to step out of that group. It supports launchd,
+systemd-user, and containers where the gateway is PID 1.
+
 ## Changelog
 
 ### 0.6.1 — fleet-reported fixes + coding swarm
